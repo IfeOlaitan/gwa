@@ -12,7 +12,7 @@ env:
   K8S_NAMESPACE: default
 
 jobs:
-  build-and-deploy:
+  build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -38,6 +38,18 @@ jobs:
             ${{ secrets.DOCKER_IMAGE }}:latest
             ${{ secrets.DOCKER_IMAGE }}:${{ steps.tag.outputs.TAG }}
 
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Generate unique tag
+        id: tag
+        run: |
+          echo "TAG=${GITHUB_SHA::7}-$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
+
       - name: Setup Kind Cluster
         uses: helm/kind-action@v1.5.0
         with:
@@ -51,6 +63,18 @@ jobs:
             --set image.tag=${{ steps.tag.outputs.TAG }} \
             --set image.repository=${{ secrets.DOCKER_IMAGE }} \
             --wait
+
+  test:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Setup Kind Cluster
+        uses: helm/kind-action@v1.5.0
+        with:
+          cluster_name: kind-cluster
 
       - name: Wait for deployment
         run: |
@@ -76,11 +100,9 @@ jobs:
 
       - name: Test deployment
         run: |
-          # Get service port
           NODE_PORT=$(kubectl get svc ${{ env.HELM_RELEASE_NAME }} -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.spec.ports[0].nodePort}')
           echo "Service exposed on port: $NODE_PORT"
           
-          # Verify all pods are running
           READY_PODS=$(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app.kubernetes.io/name=${{ env.HELM_RELEASE_NAME }} -o jsonpath='{.items[*].status.containerStatuses[0].ready}' | tr ' ' '\n' | grep -c "true")
           TOTAL_PODS=$(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app.kubernetes.io/name=${{ env.HELM_RELEASE_NAME }} --no-headers | wc -l)
           
@@ -89,8 +111,17 @@ jobs:
             exit 1
           fi
 
-      - name: Test rollback if needed
-        if: failure()
+  rollback:
+    needs: test
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Kind Cluster
+        uses: helm/kind-action@v1.5.0
+        with:
+          cluster_name: kind-cluster
+
+      - name: Rollback deployment
         run: |
           echo "Deployment failed! Rolling back..."
           helm rollback ${{ env.HELM_RELEASE_NAME }} 0 -n ${{ env.K8S_NAMESPACE }}
@@ -101,8 +132,17 @@ jobs:
           echo "\nPod status after rollback:"
           kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app.kubernetes.io/name=${{ env.HELM_RELEASE_NAME }}
 
-      - name: Cleanup
-        if: always()
+  cleanup:
+    needs: [build, deploy, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Kind Cluster
+        uses: helm/kind-action@v1.5.0
+        with:
+          cluster_name: kind-cluster
+
+      - name: Cleanup resources
         run: |
           echo "Cleaning up resources..."
           helm list -n ${{ env.K8S_NAMESPACE }}
