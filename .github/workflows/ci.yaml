@@ -6,7 +6,7 @@ on:
     paths-ignore:
       - 'helm/**'
       - 'README.md'
-      -
+
 env:
   HELM_RELEASE_NAME: gwa
   K8S_NAMESPACE: default
@@ -71,14 +71,29 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v2
 
+      - name: Generate unique tag
+        id: tag
+        run: |
+          echo "TAG=${GITHUB_SHA::7}-$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
+
       - name: Setup Kind Cluster
         uses: helm/kind-action@v1.5.0
         with:
           cluster_name: kind-cluster
 
+      - name: Deploy with Helm
+        run: |
+          helm upgrade --install ${{ env.HELM_RELEASE_NAME }} ./helm/gwa-chart \
+            --namespace ${{ env.K8S_NAMESPACE }} \
+            --create-namespace \
+            --set image.tag=${{ steps.tag.outputs.TAG }} \
+            --set image.repository=${{ secrets.DOCKER_IMAGE }} \
+            --wait
+
       - name: Wait for deployment
         run: |
           echo "Waiting for deployment to be ready..."
+          sleep 10  # Give some time for pods to start
           kubectl wait --for=condition=available --timeout=300s deployment/${{ env.HELM_RELEASE_NAME }} -n ${{ env.K8S_NAMESPACE }}
 
       - name: Monitor rolling update
@@ -100,14 +115,22 @@ jobs:
 
       - name: Test deployment
         run: |
+          # Wait for service to be available
+          echo "Waiting for service..."
+          kubectl get svc ${{ env.HELM_RELEASE_NAME }} -n ${{ env.K8S_NAMESPACE }}
+          
           NODE_PORT=$(kubectl get svc ${{ env.HELM_RELEASE_NAME }} -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.spec.ports[0].nodePort}')
           echo "Service exposed on port: $NODE_PORT"
           
           READY_PODS=$(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app.kubernetes.io/name=${{ env.HELM_RELEASE_NAME }} -o jsonpath='{.items[*].status.containerStatuses[0].ready}' | tr ' ' '\n' | grep -c "true")
           TOTAL_PODS=$(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app.kubernetes.io/name=${{ env.HELM_RELEASE_NAME }} --no-headers | wc -l)
           
+          echo "Ready Pods: $READY_PODS"
+          echo "Total Pods: $TOTAL_PODS"
+          
           if [ "$READY_PODS" -ne "$TOTAL_PODS" ]; then
             echo "Not all pods are ready! Ready: $READY_PODS, Total: $TOTAL_PODS"
+            kubectl describe pods -n ${{ env.K8S_NAMESPACE }} -l app.kubernetes.io/name=${{ env.HELM_RELEASE_NAME }}
             exit 1
           fi
 
@@ -116,13 +139,29 @@ jobs:
     if: failure()
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Generate unique tag
+        id: tag
+        run: |
+          echo "TAG=${GITHUB_SHA::7}-$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
+
       - name: Setup Kind Cluster
         uses: helm/kind-action@v1.5.0
         with:
           cluster_name: kind-cluster
 
-      - name: Rollback deployment
+      - name: Deploy and then Rollback
         run: |
+          # First deploy the current version
+          helm upgrade --install ${{ env.HELM_RELEASE_NAME }} ./helm/gwa-chart \
+            --namespace ${{ env.K8S_NAMESPACE }} \
+            --create-namespace \
+            --set image.tag=${{ steps.tag.outputs.TAG }} \
+            --set image.repository=${{ secrets.DOCKER_IMAGE }} \
+            --wait
+
           echo "Deployment failed! Rolling back..."
           helm rollback ${{ env.HELM_RELEASE_NAME }} 0 -n ${{ env.K8S_NAMESPACE }}
           
