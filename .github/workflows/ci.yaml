@@ -99,13 +99,13 @@ jobs:
       - name: Monitor rolling update
         run: |
           echo "Current pods before update:"
-          kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app.kubernetes.io/name=${{ env.HELM_RELEASE_NAME }}
+          kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=gwa
           
           echo "\nWatching deployment rollout..."
           kubectl rollout status deployment/${{ env.HELM_RELEASE_NAME }} -n ${{ env.K8S_NAMESPACE }}
           
           echo "\nPod status after update:"
-          kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app.kubernetes.io/name=${{ env.HELM_RELEASE_NAME }}
+          kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=gwa
           
           echo "\nDeployment details:"
           kubectl describe deployment ${{ env.HELM_RELEASE_NAME }} -n ${{ env.K8S_NAMESPACE }}
@@ -122,15 +122,20 @@ jobs:
           NODE_PORT=$(kubectl get svc ${{ env.HELM_RELEASE_NAME }} -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.spec.ports[0].nodePort}')
           echo "Service exposed on port: $NODE_PORT"
           
-          READY_PODS=$(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app.kubernetes.io/name=${{ env.HELM_RELEASE_NAME }} -o jsonpath='{.items[*].status.containerStatuses[0].ready}' | tr ' ' '\n' | grep -c "true")
-          TOTAL_PODS=$(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app.kubernetes.io/name=${{ env.HELM_RELEASE_NAME }} --no-headers | wc -l)
+          # Wait for pods to be ready
+          echo "Waiting for pods..."
+          sleep 30
+          
+          # Check pods with your deployment labels
+          READY_PODS=$(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=gwa -o jsonpath='{.items[*].status.containerStatuses[0].ready}' | tr ' ' '\n' | grep -c "true")
+          TOTAL_PODS=$(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=gwa --no-headers | wc -l)
           
           echo "Ready Pods: $READY_PODS"
           echo "Total Pods: $TOTAL_PODS"
           
           if [ "$READY_PODS" -ne "$TOTAL_PODS" ]; then
             echo "Not all pods are ready! Ready: $READY_PODS, Total: $TOTAL_PODS"
-            kubectl describe pods -n ${{ env.K8S_NAMESPACE }} -l app.kubernetes.io/name=${{ env.HELM_RELEASE_NAME }}
+            kubectl describe pods -n ${{ env.K8S_NAMESPACE }} -l app=gwa
             exit 1
           fi
 
@@ -169,7 +174,7 @@ jobs:
           kubectl rollout status deployment/${{ env.HELM_RELEASE_NAME }} -n ${{ env.K8S_NAMESPACE }}
           
           echo "\nPod status after rollback:"
-          kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app.kubernetes.io/name=${{ env.HELM_RELEASE_NAME }}
+          kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=gwa
 
   cleanup:
     needs: [build, deploy, test]
