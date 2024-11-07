@@ -161,7 +161,7 @@ jobs:
         run: |
           git config --global user.email "ifeoluwa1201@gmail.com"
           git config --global user.name "IfeOlaitan"
-          git add helm/gwa/values.yaml
+          git add helm/gwa-chart/values.yaml
           git commit -m "Update tag in Helm chart"
           git push
 
