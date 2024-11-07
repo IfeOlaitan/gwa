@@ -1,0 +1,109 @@
+name: Build and Deploy with Helm
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - 'helm/**'
+      - 'README.md'
+      -
+env:
+  HELM_RELEASE_NAME: gwa
+  K8S_NAMESPACE: default
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Generate unique tag
+        id: tag
+        run: |
+          echo "TAG=${GITHUB_SHA::7}-$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v2
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_IMAGE }}:latest
+            ${{ secrets.DOCKER_IMAGE }}:${{ steps.tag.outputs.TAG }}
+
+      - name: Setup Kind Cluster
+        uses: helm/kind-action@v1.5.0
+        with:
+          cluster_name: kind-cluster
+
+      - name: Deploy with Helm
+        run: |
+          helm upgrade --install ${{ env.HELM_RELEASE_NAME }} ./helm/gwa-chart \
+            --namespace ${{ env.K8S_NAMESPACE }} \
+            --create-namespace \
+            --set image.tag=${{ steps.tag.outputs.TAG }} \
+            --set image.repository=${{ secrets.DOCKER_IMAGE }} \
+            --wait
+
+      - name: Wait for deployment
+        run: |
+          echo "Waiting for deployment to be ready..."
+          kubectl wait --for=condition=available --timeout=300s deployment/${{ env.HELM_RELEASE_NAME }} -n ${{ env.K8S_NAMESPACE }}
+
+      - name: Monitor rolling update
+        run: |
+          echo "Current pods before update:"
+          kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app.kubernetes.io/name=${{ env.HELM_RELEASE_NAME }}
+          
+          echo "\nWatching deployment rollout..."
+          kubectl rollout status deployment/${{ env.HELM_RELEASE_NAME }} -n ${{ env.K8S_NAMESPACE }}
+          
+          echo "\nPod status after update:"
+          kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app.kubernetes.io/name=${{ env.HELM_RELEASE_NAME }}
+          
+          echo "\nDeployment details:"
+          kubectl describe deployment ${{ env.HELM_RELEASE_NAME }} -n ${{ env.K8S_NAMESPACE }}
+          
+          echo "\nRollout history:"
+          kubectl rollout history deployment/${{ env.HELM_RELEASE_NAME }} -n ${{ env.K8S_NAMESPACE }}
+
+      - name: Test deployment
+        run: |
+          # Get service port
+          NODE_PORT=$(kubectl get svc ${{ env.HELM_RELEASE_NAME }} -n ${{ env.K8S_NAMESPACE }} -o jsonpath='{.spec.ports[0].nodePort}')
+          echo "Service exposed on port: $NODE_PORT"
+          
+          # Verify all pods are running
+          READY_PODS=$(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app.kubernetes.io/name=${{ env.HELM_RELEASE_NAME }} -o jsonpath='{.items[*].status.containerStatuses[0].ready}' | tr ' ' '\n' | grep -c "true")
+          TOTAL_PODS=$(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app.kubernetes.io/name=${{ env.HELM_RELEASE_NAME }} --no-headers | wc -l)
+          
+          if [ "$READY_PODS" -ne "$TOTAL_PODS" ]; then
+            echo "Not all pods are ready! Ready: $READY_PODS, Total: $TOTAL_PODS"
+            exit 1
+          fi
+
+      - name: Test rollback if needed
+        if: failure()
+        run: |
+          echo "Deployment failed! Rolling back..."
+          helm rollback ${{ env.HELM_RELEASE_NAME }} 0 -n ${{ env.K8S_NAMESPACE }}
+          
+          echo "\nWaiting for rollback to complete..."
+          kubectl rollout status deployment/${{ env.HELM_RELEASE_NAME }} -n ${{ env.K8S_NAMESPACE }}
+          
+          echo "\nPod status after rollback:"
+          kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app.kubernetes.io/name=${{ env.HELM_RELEASE_NAME }}
+
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "Cleaning up resources..."
+          helm list -n ${{ env.K8S_NAMESPACE }}
+          kubectl get all -n ${{ env.K8S_NAMESPACE }}

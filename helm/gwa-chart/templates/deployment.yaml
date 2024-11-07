@@ -1,0 +1,25 @@
+# workwave-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gwa
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate      # Explicitly specify rolling update
+    rollingUpdate:
+      maxSurge: 1           # Maximum number of pods that can be scheduled above desired number
+      maxUnavailable: 0     # Maximum number of pods that can be unavailable during update
+  selector:
+    matchLabels:
+      app: gwa
+  template:
+    metadata:
+      labels:
+        app: gwa
+    spec:
+      containers:
+        - name: gwa
+          image: {{.Values.image.repository}}:{{.Values.image.tag}}  # Your Docker Hub image
+          ports:
+            - containerPort: 80
